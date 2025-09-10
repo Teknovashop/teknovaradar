@@ -85,4 +85,60 @@ def upsert_tender(source_code, external_id, title, summary, body, url, published
         "p_summary": summary[:8000] if summary else None,
         "p_body": body[:200000] if body else None,
         "p_url": url or "https://example.com",
-        "p_statu_
+        "p_status": "open",
+        "p_budget": None,
+        "p_currency": "EUR",
+        "p_entity": None,
+        "p_cpv": None,
+        "p_country": "ES",
+        "p_region": None,
+        "p_published": (published_at or dt.datetime.utcnow()).isoformat(),
+        "p_deadline": None
+    }
+    r = requests.post(RPC_UPSERT_TENDER, headers=SB_HEADERS, json=payload, timeout=45)
+    r.raise_for_status()
+    try:
+        data = r.json()
+    except Exception:
+        raise RuntimeError(f"Supabase RPC upsert_tender response: {r.text}")
+    return data[0] if isinstance(data, list) else data
+
+def assign_categories(tender_id):
+    r = requests.post(RPC_ASSIGN_CATS, headers=SB_HEADERS, json={"p_tender_id": tender_id}, timeout=30)
+    r.raise_for_status()
+
+def main():
+    total = 0
+    for source_code, url in SOURCES:
+        try:
+            xml = fetch(url)
+        except Exception as e:
+            print(f"[WARN] No se pudo obtener {source_code}: {e}")
+            continue
+
+        try:
+            items = parse_rss_or_atom(xml)
+        except Exception as e:
+            print(f"[WARN] No se pudo parsear {source_code}: {e}")
+            continue
+
+        for title, link, desc, pub in items[:100]:
+            text = f"{title}\n{desc}"
+            if not DEV_MODE:
+                if not KEYWORDS.search(text):
+                    continue  # filtro normal
+            # en DEV_MODE no filtramos para ver pasar items
+            published = parse_date(pub)
+            external_id = link or (title[:32] + str(abs(hash(text)) % 10**8))
+            try:
+                tid = upsert_tender(source_code, external_id, title, desc, None, link, published)
+                assign_categories(tid)
+                total += 1
+                print("Upserted:", source_code, tid, title[:80])
+            except Exception as e:
+                print(f"[WARN] Falló upsert para {source_code}: {e}")
+
+    print(f"TOTAL INSERADOS: {total}")
+
+if __name__ == "__main__":
+    main()
