@@ -1,31 +1,28 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE! // clave de servicio (solo en backend)
-);
+export const dynamic = "force-dynamic";
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
+export async function GET() {
+  const url = `${process.env.SUPABASE_URL}/rest/v1/rpc/search_tenders`;
+  // Forzamos sin filtros para diagnóstico
+  const body = { q: null, cat_slug: null, src_code: null, limit_n: 50, offset_n: 0 };
 
-  const q = searchParams.get("q") || null;
-  const cat_slug = searchParams.get("cat_slug") || null;
-  const src_code = searchParams.get("src_code") || null;
-  const limit_n = parseInt(searchParams.get("limit") || "20", 10);
-  const offset_n = parseInt(searchParams.get("offset") || "0", 10);
-
-  const { data, error } = await supabase.rpc("radar.search_tenders", {
-    q,
-    cat_slug,
-    src_code,
-    limit_n,
-    offset_n,
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: process.env.SUPABASE_SERVICE_ROLE || "",
+      Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE}`,
+      "Content-Type": "application/json",
+      Prefer: "count=exact",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
   });
 
-  if (error) {
-    return NextResponse.json({ error }, { status: 500 });
+  if (!r.ok) {
+    const err = await r.text();
+    return NextResponse.json({ error: err }, { status: r.status });
   }
-
+  const data = await r.json();
   return NextResponse.json({ items: data });
 }
