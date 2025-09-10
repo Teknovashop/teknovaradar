@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
-DEV_MODE = os.environ.get("DEV_MODE", "0") == "1"  # si 1, usa fuente de prueba y menos filtros
+DEV_MODE = os.environ.get("DEV_MODE", "0") == "1"  # si 1, añade fuente de prueba y no filtra
 
 RPC_UPSERT_TENDER = f"{SUPABASE_URL}/rest/v1/rpc/upsert_tender"
 RPC_ASSIGN_CATS   = f"{SUPABASE_URL}/rest/v1/rpc/assign_categories_from_keywords"
@@ -12,22 +12,17 @@ HTTP_HEADERS = {
     "User-Agent": "Radar-Teknovashop/1.0 (+https://teknovashop.com)",
     "Accept": "application/xml,text/xml,application/atom+xml,*/*",
 }
-
 SB_HEADERS = {
     "apikey": SERVICE_ROLE,
     "Authorization": f"Bearer {SERVICE_ROLE}",
     "Content-Type": "application/json",
 }
 
-# --- Fuentes ---
 SOURCES = [
-    ("DEV", "https://hnrss.org/frontpage") if DEV_MODE else None,
-    # Ejemplo de feed TED (Atom genérico). Luego afinamos con consultas:
     ("TED", "https://ted.europa.eu/udl?uri=TED:FEED:ES:ATOM"),
-    # BOE RSS puede dar 404/403 desde runners; lo activaremos con scraping HTML:
-    # ("BOE", "https://www.boe.es/diario_boe/rss.php"),
 ]
-SOURCES = [s for s in SOURCES if s]
+if DEV_MODE:
+    SOURCES.insert(0, ("DEV", "https://hnrss.org/frontpage"))
 
 KEYWORDS = re.compile(
     r"(inteligencia artificial|machine learning|ux|diseño|realidad (virtual|aumentada)|kubernetes|aws|azure|datos|bi)\b",
@@ -64,14 +59,10 @@ def parse_rss_or_atom(xml_bytes: bytes):
 
 def parse_date(s: str):
     for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S %z"):
-        try:
-            return dt.datetime.strptime(s, fmt)
-        except Exception:
-            pass
-    try:
-        return dt.datetime.fromisoformat(s.replace("Z",""))
-    except Exception:
-        return dt.datetime.utcnow()
+        try: return dt.datetime.strptime(s, fmt)
+        except Exception: pass
+    try: return dt.datetime.fromisoformat(s.replace("Z",""))
+    except Exception: return dt.datetime.utcnow()
 
 def upsert_tender(source_code, external_id, title, summary, body, url, published_at):
     payload = {
@@ -103,20 +94,16 @@ def assign_categories(tender_id):
 def main():
     total = 0
     for source_code, url in SOURCES:
-        try:
-            xml = fetch(url)
+        try: xml = fetch(url)
         except Exception as e:
-            print(f"[WARN] No se pudo obtener {source_code}: {e}")
-            continue
-        try:
-            items = parse_rss_or_atom(xml)
+            print(f"[WARN] No se pudo obtener {source_code}: {e}"); continue
+        try: items = parse_rss_or_atom(xml)
         except Exception as e:
-            print(f"[WARN] No se pudo parsear {source_code}: {e}")
-            continue
+            print(f"[WARN] No se pudo parsear {source_code}: {e}"); continue
 
         for title, link, desc, pub in items[:100]:
             text = f"{title}\n{desc}"
-            if not DEV_MODE and not KEYWORDS.search(text):
+            if not DEV_MODE and not KEYWORDS.search(text):  # filtra si no es modo dev
                 continue
             published = parse_date(pub)
             external_id = link or (title[:32] + str(abs(hash(text)) % 10**8))
