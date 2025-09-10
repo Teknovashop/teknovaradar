@@ -1,62 +1,79 @@
-import { headers } from "next/headers";
+"use client";
 
-export const dynamic = "force-dynamic";
+import { useState, useEffect } from "react";
 
-const fDate = (d?: string) =>
-  d ? new Intl.DateTimeFormat("es-ES", { dateStyle: "medium" }).format(new Date(d)) : "";
+export default function RadarPage() {
+  const [items, setItems] = useState<any[]>([]);
+  const [q, setQ] = useState("");
+  const [src, setSrc] = useState("");
+  const [cat, setCat] = useState("");
 
-const fMoney = (v?: number, c?: string) =>
-  v != null ? new Intl.NumberFormat("es-ES", { style: "currency", currency: c || "EUR" }).format(v) : "Sin presupuesto";
+  async function search() {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (src) params.set("src_code", src);
+    if (cat) params.set("cat_slug", cat);
 
-async function fetchItems(searchParams?: { q?: string; src?: string; cat?: string }) {
-  const h = headers();
-  const host = h.get("x-forwarded-host") || h.get("host") || "localhost:3000";
-  const proto = (h.get("x-forwarded-proto") || "https") + "://";
-  const base = `${proto}${host}`;
-  const url = new URL("/api/radar/search", base);
-  if (searchParams?.q) url.searchParams.set("q", searchParams.q);
-  if (searchParams?.src) url.searchParams.set("src", searchParams.src);
-  if (searchParams?.cat) url.searchParams.set("cat", searchParams.cat);
-
-  const res = await fetch(url.toString(), { cache: "no-store" });
-  if (!res.ok) {
-    console.error("API error", await res.text());
-    return [];
+    const res = await fetch(`/api/radar/search?${params.toString()}`);
+    const json = await res.json();
+    setItems(json.items || []);
   }
-  const { items } = await res.json();
-  return items || [];
-}
 
-export default async function RadarPage({ searchParams }: { searchParams?: { q?: string; src?: string; cat?: string } }) {
-  const items = await fetchItems(searchParams);
+  useEffect(() => {
+    search();
+  }, []);
 
   return (
-    <main className="max-w-5xl mx-auto p-6 space-y-6">
-      <h1 className="text-2xl font-semibold">Radar Tecnológico</h1>
+    <div style={{ padding: "1rem" }}>
+      <h1>Radar Tecnológico</h1>
+      <div style={{ marginBottom: "1rem" }}>
+        <input
+          type="text"
+          placeholder="Buscar IA, UX, VR, datos..."
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <input
+          type="text"
+          placeholder="Fuente (ej. BOE, TED)"
+          value={src}
+          onChange={(e) => setSrc(e.target.value)}
+        />
+        <input
+          type="text"
+          placeholder="Categoría (slug)"
+          value={cat}
+          onChange={(e) => setCat(e.target.value)}
+        />
+        <button onClick={search}>Buscar</button>
+      </div>
 
-      <form className="grid gap-2 md:grid-cols-[1fr,200px,200px,120px]">
-        <input name="q" defaultValue={searchParams?.q || ""} placeholder="Buscar IA, UX, VR, datos..." className="border px-3 py-2 rounded w-full" />
-        <input name="src" defaultValue={searchParams?.src || ""} placeholder="Fuente (ej. BOE, TED)" className="border px-3 py-2 rounded w-full" />
-        <input name="cat" defaultValue={searchParams?.cat || ""} placeholder="Categoría (slug)" className="border px-3 py-2 rounded w-full" />
-        <button className="px-4 py-2 border rounded">Buscar</button>
-      </form>
-
-      {!items.length && <p className="text-sm">Sin resultados (¿hay datos en Supabase?).</p>}
-
-      <ul className="space-y-3">
-        {items.map((t: any) => (
-          <li key={t.id} className="border rounded p-4">
-            <a href={t.url} target="_blank" rel="noreferrer" className="font-medium underline">
-              {t.title}
-            </a>
-            <div className="text-sm opacity-70">
-              {t.source_name} · {t.entity || "—"} · {fMoney(t.budget_amount, t.currency)}
-            </div>
-            <p className="mt-2 text-sm">{t.summary}</p>
-            <div className="text-xs opacity-60 mt-1">{t.deadline_at ? `Cierre: ${fDate(t.deadline_at)}` : ""}</div>
-          </li>
-        ))}
-      </ul>
-    </main>
+      {items.length === 0 ? (
+        <p><i>Sin resultados (¿hay datos en Supabase?).</i></p>
+      ) : (
+        <ul>
+          {items.map((tender) => (
+            <li key={tender.id} style={{ marginBottom: "1rem" }}>
+              <a href={tender.url} target="_blank" rel="noopener noreferrer">
+                {tender.title}
+              </a>
+              <div>
+                {tender.source_name} · {tender.entity} ·{" "}
+                {tender.budget_amount
+                  ? `${tender.budget_amount} ${tender.currency}`
+                  : "— Sin presupuesto"}
+              </div>
+              <p>{tender.summary}</p>
+              <small>
+                Cierre:{" "}
+                {tender.deadline_at
+                  ? new Date(tender.deadline_at).toLocaleDateString()
+                  : "N/D"}
+              </small>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
