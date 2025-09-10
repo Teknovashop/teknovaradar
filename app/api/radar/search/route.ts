@@ -2,10 +2,16 @@ import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const q = searchParams.get("q");
+  const cat_slug = searchParams.get("cat");
+  const src_code = searchParams.get("src");
+  const limit_n = Number(searchParams.get("limit") || 50);
+  const offset_n = Number(searchParams.get("offset") || 0);
+
   const url = `${process.env.SUPABASE_URL}/rest/v1/rpc/search_tenders`;
-  // Forzamos sin filtros para diagnóstico
-  const body = { q: null, cat_slug: null, src_code: null, limit_n: 50, offset_n: 0 };
+  const body = { q, cat_slug, src_code, limit_n, offset_n };
 
   const r = await fetch(url, {
     method: "POST",
