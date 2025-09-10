@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
-DEV_MODE = os.environ.get("DEV_MODE", "0") == "1"  # si 1, usa feed de prueba y menos filtros
+DEV_MODE = os.environ.get("DEV_MODE", "0") == "1"  # si 1, usa fuente de prueba y menos filtros
 
 RPC_UPSERT_TENDER = f"{SUPABASE_URL}/rest/v1/rpc/upsert_tender"
 RPC_ASSIGN_CATS   = f"{SUPABASE_URL}/rest/v1/rpc/assign_categories_from_keywords"
@@ -20,30 +20,28 @@ SB_HEADERS = {
 }
 
 # --- Fuentes ---
-# BOE puede fallar con 404/403 desde runners, así que no bloqueamos si falla.
 SOURCES = [
-    # ("BOE", "https://www.boe.es/diario_boe/rss.php"),  # (puede devolver 404/403)
-    # Feed de prueba (para validar pipeline). Cámbialo por fuentes reales cuando quieras:
-    ("DEV", "https://hnrss.org/frontpage"),  # SOLO DEV: genera ítems
-    # EU TED (ejemplo atom genérico). Ajustaremos consultas específicas después:
+    ("DEV", "https://hnrss.org/frontpage") if DEV_MODE else None,
+    # Ejemplo de feed TED (Atom genérico). Luego afinamos con consultas:
     ("TED", "https://ted.europa.eu/udl?uri=TED:FEED:ES:ATOM"),
+    # BOE RSS puede dar 404/403 desde runners; lo activaremos con scraping HTML:
+    # ("BOE", "https://www.boe.es/diario_boe/rss.php"),
 ]
+SOURCES = [s for s in SOURCES if s]
 
 KEYWORDS = re.compile(
     r"(inteligencia artificial|machine learning|ux|diseño|realidad (virtual|aumentada)|kubernetes|aws|azure|datos|bi)\b",
-    re.I
+    re.I,
 )
 
-def fetch(url: str):
+def fetch(url: str) -> bytes:
     r = requests.get(url, headers=HTTP_HEADERS, timeout=45, allow_redirects=True)
-    if not r.ok:
-        raise requests.HTTPError(f"{r.status_code} for {url}")
+    r.raise_for_status()
     return r.content
 
 def parse_rss_or_atom(xml_bytes: bytes):
     root = ET.fromstring(xml_bytes)
     ns = {"atom": "http://www.w3.org/2005/Atom"}
-    # RSS items
     items = []
     for it in root.findall(".//item"):
         title = (it.findtext("title") or "").strip()
@@ -53,7 +51,6 @@ def parse_rss_or_atom(xml_bytes: bytes):
         items.append((title, link, desc, pub))
     if items:
         return items
-    # Atom entries
     for e in root.findall(".//atom:entry", ns):
         title = (e.findtext("atom:title", default="", namespaces=ns) or "").strip()
         link_el = e.find("atom:link", ns)
@@ -77,7 +74,6 @@ def parse_date(s: str):
         return dt.datetime.utcnow()
 
 def upsert_tender(source_code, external_id, title, summary, body, url, published_at):
-    import json
     payload = {
         "p_source_code": source_code,
         "p_external_id": external_id,
@@ -97,10 +93,7 @@ def upsert_tender(source_code, external_id, title, summary, body, url, published
     }
     r = requests.post(RPC_UPSERT_TENDER, headers=SB_HEADERS, json=payload, timeout=45)
     r.raise_for_status()
-    try:
-        data = r.json()
-    except Exception:
-        raise RuntimeError(f"Supabase RPC upsert_tender response: {r.text}")
+    data = r.json()
     return data[0] if isinstance(data, list) else data
 
 def assign_categories(tender_id):
@@ -115,7 +108,6 @@ def main():
         except Exception as e:
             print(f"[WARN] No se pudo obtener {source_code}: {e}")
             continue
-
         try:
             items = parse_rss_or_atom(xml)
         except Exception as e:
@@ -124,10 +116,8 @@ def main():
 
         for title, link, desc, pub in items[:100]:
             text = f"{title}\n{desc}"
-            if not DEV_MODE:
-                if not KEYWORDS.search(text):
-                    continue  # filtro normal
-            # en DEV_MODE no filtramos para ver pasar items
+            if not DEV_MODE and not KEYWORDS.search(text):
+                continue
             published = parse_date(pub)
             external_id = link or (title[:32] + str(abs(hash(text)) % 10**8))
             try:
@@ -137,8 +127,7 @@ def main():
                 print("Upserted:", source_code, tid, title[:80])
             except Exception as e:
                 print(f"[WARN] Falló upsert para {source_code}: {e}")
-
-    print(f"TOTAL INSERADOS: {total}")
+    print(f"TOTAL INSERTADOS: {total}")
 
 if __name__ == "__main__":
     main()
