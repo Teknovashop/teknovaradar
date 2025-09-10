@@ -3,7 +3,7 @@ name: Radar Tecnológico (daily)
 on:
   schedule:
     - cron: "15 6 * * *"   # 06:15 UTC diario
-  workflow_dispatch:        # permite lanzarlo a mano
+  workflow_dispatch:
 
 jobs:
   run:
@@ -14,8 +14,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install requests
-      - name: Ejecutar scraper
+      - name: Ejecutar scraper (DEV)
         run: python scraper/scraper_radar.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          DEV_MODE: "1"   # <- quitar cuando ya veas datos correctos
