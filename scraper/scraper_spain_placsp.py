@@ -1,4 +1,3 @@
-# scraper/scraper_spain_placsp.py
 import os, requests, re, datetime as dt
 import xml.etree.ElementTree as ET
 
@@ -6,16 +5,17 @@ import xml.etree.ElementTree as ET
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
 PLACSP_FEEDS = os.environ.get("PLACSP_FEEDS", "").strip()
+STRICT_FILTER = os.environ.get("STRICT_FILTER", "true").lower() == "true"
+MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "200"))
 
 if not PLACSP_FEEDS:
     raise SystemExit("Falta PLACSP_FEEDS (lista separada por comas con URLs de feeds Atom/RSS de la PLACSP)")
 
-# RPCs en Supabase
 RPC_UPSERT_TENDER = f"{SUPABASE_URL}/rest/v1/rpc/upsert_tender"
 RPC_ASSIGN_CATS   = f"{SUPABASE_URL}/rest/v1/rpc/assign_categories_from_keywords"
 
 HTTP_HEADERS = {
-    "User-Agent": "Radar-Teknovashop/1.0 (+https://teknovashop.com)",
+    "User-Agent": "Radar-Teknovashop/1.1 (+https://teknovashop.com)",
     "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml, */*",
 }
 
@@ -25,26 +25,28 @@ SB_HEADERS = {
     "Content-Type": "application/json",
 }
 
-# Palabras clave tecnológicas (ajústalas)
+# Palabras clave tecnológicas (ajústalas a gusto)
 KEYWORDS = re.compile(
-    r"(inteligencia artificial|machine learning|deep learning|datos|big data|analítica|"
-    r"visualización|cloud|nube|aws|azure|gcp|kubernetes|devops|software|desarrollo|"
-    r"ux|ui|diseño|ciberseguridad|seguridad|iot|realidad (virtual|aumentada)|blockchain|gemelos digitales)"
+    r"(inteligencia artificial|ai\b|machine learning|deep learning|datos|data\b|big data|anal[ií]tica|"
+    r"visualizaci[oó]n|cloud|nube|aws|azure|gcp|kubernetes|devops|software|desarrollo|"
+    r"ux|ui|diseño|ciberseguridad|seguridad inform[aá]tica|iot|realidad (virtual|aumentada)|"
+    r"blockchain|gemelos digitales|5g|hpc|supercomputaci[oó]n|plataforma digital|data lake|data mesh)"
     r"\b", re.I
 )
 
-# ====== Utilidades ======
+# ====== Utils ======
 def fetch(url: str) -> bytes:
     r = requests.get(url, headers=HTTP_HEADERS, timeout=60, allow_redirects=True)
     r.raise_for_status()
     return r.content
 
 def parse_rss_or_atom(xml_bytes: bytes):
-    """Devuelve lista de tuplas: (title, link, summary, published)"""
+    """Devuelve lista de (title, link, summary, published_raw)."""
     root = ET.fromstring(xml_bytes)
 
-    # 1) RSS 2.0
     items = []
+
+    # RSS 2.0
     for it in root.findall(".//item"):
         title = (it.findtext("title") or "").strip()
         link  = (it.findtext("link") or "").strip()
@@ -54,7 +56,7 @@ def parse_rss_or_atom(xml_bytes: bytes):
     if items:
         return items
 
-    # 2) Atom
+    # Atom con namespace clásico
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     for e in root.findall(".//atom:entry", ns):
         title = (e.findtext("atom:title", default="", namespaces=ns) or "").strip()
@@ -65,12 +67,24 @@ def parse_rss_or_atom(xml_bytes: bytes):
         pub  = (e.findtext("atom:updated", default="", namespaces=ns) or
                 e.findtext("atom:published", default="", namespaces=ns) or "").strip()
         items.append((title, link, desc, pub))
+    if items:
+        return items
+
+    # Atom sin declarar namespace (poco habitual, pero por si acaso)
+    for e in root.findall(".//entry"):
+        title = (e.findtext("title") or "").strip()
+        link_el = e.find("link")
+        link = link_el.get("href") if link_el is not None else ""
+        desc = (e.findtext("summary") or e.findtext("content") or "").strip()
+        pub  = (e.findtext("updated") or e.findtext("published") or "").strip()
+        items.append((title, link, desc, pub))
     return items
 
 def parse_date(s: str):
-    s = (s or "").replace("Z","+0000")
+    s = (s or "").strip().replace("Z","+0000")
     fmts = [
-        "%a, %d %b %Y %H:%M:%S %z",  # RSS típico
+        "%a, %d %b %Y %H:%M:%S %z",  # RSS en inglés
+        "%d/%m/%Y %H:%M",            # algunos feeds locales
         "%Y-%m-%dT%H:%M:%S%z",       # ISO con tz
         "%Y-%m-%dT%H:%M:%S",         # ISO sin tz
         "%Y-%m-%d",
@@ -87,8 +101,8 @@ def parse_date(s: str):
 
 def upsert_tender(source_code, external_id, title, summary, url, published_at):
     payload = {
-        "p_source_code": source_code,  # ES-PLACSP
-        "p_external_id": external_id,  # usamos el link como id externo
+        "p_source_code": source_code,   # 'ES-PLACSP'
+        "p_external_id": external_id,   # usamos link como id externo
         "p_title": title[:8000],
         "p_summary": (summary or "")[:8000] or None,
         "p_body": None,
@@ -116,8 +130,10 @@ def assign_categories(tender_id):
 def main():
     total = 0
     feeds = [u.strip() for u in PLACSP_FEEDS.split(",") if u.strip()]
+    print(f"[INFO] Feeds PLACSP recibidos: {len(feeds)}")
+
     for feed_url in feeds:
-        print(f"[INFO] Leyendo feed PLACSP: {feed_url}")
+        print(f"[INFO] Leyendo: {feed_url}")
         try:
             xml = fetch(feed_url)
             items = parse_rss_or_atom(xml)
@@ -125,21 +141,34 @@ def main():
             print(f"[WARN] No se pudo procesar feed {feed_url}: {e}")
             continue
 
+        print(f"[INFO] Items en feed: {len(items)}")
+        for t, l, _, _ in items[:3]:
+            print(f"       - {t[:80]} -> {l}")
+
+        # Filtro por keywords (opcional)
+        filtered = []
         for title, link, summary, pub in items:
-            text = f"{title}\n{summary}"
-            if not KEYWORDS.search(text):
+            if not STRICT_FILTER:
+                filtered.append((title, link, summary, pub))
                 continue
+            text = f"{title}\n{summary}"
+            if KEYWORDS.search(text):
+                filtered.append((title, link, summary, pub))
+
+        print(f"[INFO] Items tras filtro (STRICT_FILTER={STRICT_FILTER}): {len(filtered)}")
+
+        for title, link, summary, pub in filtered[:MAX_ITEMS]:
             published = parse_date(pub)
             external_id = link or (title[:32] + str(abs(hash(title+summary)) % 10**8))
             try:
                 tid = upsert_tender("ES-PLACSP", external_id, title, summary, link, published)
                 assign_categories(tid)
                 total += 1
-                print("Upserted ES-PLACSP:", tid, title[:100])
+                print("  [+] Upsert ES-PLACSP:", tid, "->", title[:100])
             except Exception as e:
                 print(f"[WARN] Falló upsert ES-PLACSP: {e}")
 
-    print(f"TOTAL INSERTADOS (ES-PLACSP): {total}")
+    print(f"[DONE] TOTAL INSERTADOS (ES-PLACSP): {total}")
 
 if __name__ == "__main__":
     main()
