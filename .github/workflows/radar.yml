@@ -10,12 +10,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - run: pip install requests
-      - name: Ejecutar scraper (TED real)
+
+      # --- Scraper TED (UE) ---
+      - name: Scraper TED (UE)
         run: python scraper/scraper_radar.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+
+      # --- Scraper España (PLACSP) ---
+      - name: Scraper España (PLACSP)
+        run: python scraper/scraper_spain_placsp.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          # 👉 Lista separada por comas con tus feeds reales de la PLACSP:
+          # Ejemplos (sustituye por tus URLs de sindicación reales):
+          # PLACSP_FEEDS: "https://perfil_organismo_1/feed.atom,https://perfil_organismo_2/feed.rss"
+          PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
