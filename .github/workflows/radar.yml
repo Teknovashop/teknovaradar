@@ -1,16 +1,13 @@
 name: Radar Tecnológico (daily)
 
 on:
-  schedule:
-    - cron: "15 6 * * *"   # 06:15 UTC, ajusta si quieres
   workflow_dispatch:
+  schedule:
+    - cron: "21 6 * * *"  # 06:21 UTC diario
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,56 +22,73 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      # -------- TED (UE) ----------
+      # ------- Unión Europea (TED) - best effort (no bloquea) -------
       - name: Scraper TED (UE)
-        run: python scraper/scraper_radar.py
-        continue-on-error: true
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+        run: |
+          python scraper/scraper_radar.py || true
 
-      # -------- Diagnóstico PLACSP (feeds e items) ----------
+      # ------- Diagnóstico PLACSP (no bloquea) -------
       - name: Diagnóstico PLACSP (feeds e items)
-        continue-on-error: true
+        env:
+          PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
         run: |
           python - << 'PY'
           import os, requests, xml.etree.ElementTree as ET
           UA = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Radar-Diag/1.1",
+            "User-Agent": "Mozilla/5.0 Radar-Diag/1.2",
             "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml, */*",
             "Accept-Language": "es-ES,es;q=0.9",
-            "Referer": "https://www.contrataciondelestado.es/"
           }
           feeds = os.environ.get("PLACSP_FEEDS","").strip()
           print("[DIAG] PLACSP_FEEDS presente:", bool(feeds))
           lst = [u.strip() for u in feeds.split(",") if u.strip()]
           print("[DIAG] Nº feeds:", len(lst))
-          if not lst:
-              print("[DIAG] Falta PLACSP_FEEDS. Ejemplo: https://www.contrataciondelestado.es/sindicacion/sindicacion_1050.atom")
-          else:
+          if lst:
               url = lst[0]
               print("[DIAG] Primer feed:", url)
               r = requests.get(url, timeout=60, headers=UA, allow_redirects=True)
               print("[DIAG] HTTP status:", r.status_code, "bytes:", len(r.content))
-              text = r.content[:200].strip().lower()
-              if text.startswith(b"<!doctype html") or b"<html" in text:
-                  print("[DIAG] Parece HTML (portal). El scraper hará reintentos con variantes y proxy.")
-              else:
-                  try:
-                      ET.fromstring(r.content)
-                      print("[DIAG] XML válido ✔")
-                  except Exception as e:
-                      print("[DIAG] No es XML válido:", e)
+              try:
+                  ET.fromstring(r.content)
+                  print("[DIAG] XML válido ✔")
+              except Exception as e:
+                  print("[DIAG] No es XML válido (probable portal/HTML).", e)
           PY
-        env:
-          PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
+        continue-on-error: true
 
-      # -------- Scraper España (PLACSP) ----------
+      # ------- BOE -------
+      - name: Scraper España (BOE)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          # Configura en Secrets (ejemplo):
+          # https://www.boe.es/diario_boe/rss.php?seccion=V,https://www.boe.es/diario_boe/rss.php?tipo=B
+          BOE_FEEDS: ${{ secrets.BOE_FEEDS }}
+        run: |
+          python scraper/scraper_spain_boe.py
+
+      # ------- CCAA / Locales -------
+      - name: Scraper España (CCAA)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          # Ejemplos (pon los tuyos reales):
+          # CAT|Generalitat de Catalunya|RSS|https://contractaciopublica.gencat.cat/ecofin_pscp/AppJava/notice/searchRSS.do,
+          # MAD|Comunidad de Madrid|RSS|https://www.comunidad.madrid/contratos-publicos/rss
+          CCAA_FEEDS: ${{ secrets.CCAA_FEEDS }}
+        run: |
+          python scraper/scraper_spain_ccaa.py
+
+      # ------- PLACSP (pausado: no bloquea, deja 0 si no hay XML) -------
       - name: Scraper España (PLACSP)
-        run: python scraper/scraper_spain_placsp.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
           PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
-          STRICT_FILTER: "false"   # luego cámbialo a "true"
+          STRICT_FILTER: "false"
           MAX_ITEMS: "150"
+        run: |
+          python scraper/scraper_spain_placsp.py || true
