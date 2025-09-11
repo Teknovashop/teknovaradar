@@ -1,4 +1,4 @@
-import os, requests, re, datetime as dt, urllib.parse as up
+import os, requests, re, datetime as dt, urllib.parse as up, time, random
 import xml.etree.ElementTree as ET
 
 # ====== Config ======
@@ -14,9 +14,9 @@ if not PLACSP_FEEDS:
 RPC_UPSERT_TENDER = f"{SUPABASE_URL}/rest/v1/rpc/upsert_tender"
 RPC_ASSIGN_CATS   = f"{SUPABASE_URL}/rest/v1/rpc/assign_categories_from_keywords"
 
-# Cabeceras "de navegador" para evitar portales intermedios
+# Cabeceras tipo navegador
 HTTP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Radar-Scraper/1.2",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Radar-Scraper/1.3",
     "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml, */*",
     "Accept-Language": "es-ES,es;q=0.9",
     "Referer": "https://www.contrataciondelestado.es/",
@@ -29,7 +29,6 @@ SB_HEADERS = {
     "Content-Type": "application/json",
 }
 
-# Palabras clave tecnológicas (ajústalas)
 KEYWORDS = re.compile(
     r"(inteligencia artificial|ai\b|machine learning|deep learning|datos|data\b|big data|anal[ií]tica|"
     r"visualizaci[oó]n|cloud|nube|aws|azure|gcp|kubernetes|devops|software|desarrollo|"
@@ -39,64 +38,96 @@ KEYWORDS = re.compile(
 )
 
 # ====== Utils ======
-def is_probably_html(b: bytes) -> bool:
-    sample = (b or b"")[:512].lower()
-    return sample.startswith(b"<!doctype html") or b"<html" in sample or b"<meta" in sample
+def is_probably_html_or_json(b: bytes) -> bool:
+    s = (b or b"")[:512].strip().lower()
+    return (
+        s.startswith(b"<!doctype html")
+        or s.startswith(b"<html")
+        or b"<html" in s
+        or s.startswith(b"{")   # JSON u otra respuesta api/gateway
+        or s.startswith(b"<!doctype")
+    )
 
-def variants_for(url: str):
-    """Genera variantes (www/http) y fallback proxy r.jina.ai."""
-    urls = [url]
-
+def safe_head(b: bytes, n=200) -> str:
     try:
-        p = up.urlparse(url)
-        host = p.netloc
-        if host and not host.startswith("www."):
-            with_www = up.urlunparse(p._replace(netloc="www."+host))
-            urls.append(with_www)
-        if p.scheme == "https":
-            urls.append(up.urlunparse(p._replace(scheme="http")))
+        return (b or b"")[:n].decode("utf-8", "replace")
     except Exception:
-        pass
+        return str((b or b"")[:n])
 
-    # Fallback proxy (sólo lectura). Sirve el contenido plano sin cookies.
-    # Nota: mantiene el esquema original al proxificar.
-    def to_proxy(u: str):
-        p = up.urlparse(u)
-        prox = f"https://r.jina.ai/{p.scheme}://{p.netloc}{p.path}"
-        if p.query:
-            prox += f"?{p.query}"
-        return prox
+def add_cache_buster(url: str) -> str:
+    p = up.urlparse(url)
+    q = up.parse_qs(p.query, keep_blank_values=True)
+    q["_"] = [str(int(time.time())) + str(random.randint(100,999))]
+    new_query = up.urlencode(q, doseq=True)
+    return up.urlunparse(p._replace(query=new_query))
 
-    urls.append(to_proxy(url))
-    return list(dict.fromkeys(urls))  # quitar duplicados preservando orden
+def all_variants(url: str):
+    """Genera http/https + con/sin www + sus versiones proxificadas."""
+    out = []
+
+    def toggles(u: str):
+        try:
+            p = up.urlparse(u)
+            hosts = [p.netloc]
+            if p.netloc.startswith("www."):
+                hosts.append(p.netloc[4:])
+            else:
+                hosts.append("www."+p.netloc)
+            schemes = ["https", "http"] if p.scheme == "https" else ["http", "https"]
+            for h in dict.fromkeys(hosts):
+                for s in schemes:
+                    yield up.urlunparse(p._replace(scheme=s, netloc=h))
+        except Exception:
+            yield u
+
+    base = add_cache_buster(url)
+    for v in toggles(base):
+        out.append(v)
+
+    # proxys para cada variante
+    prox = []
+    for v in out:
+        p = up.urlparse(v)
+        prox.append(f"https://r.jina.ai/{p.scheme}://{p.netloc}{p.path}{('?' + p.query) if p.query else ''}")
+
+    # orden: variantes directas primero, luego proxys
+    full = list(dict.fromkeys(out + prox))
+    return full
 
 def fetch_xml_with_fallback(url: str) -> bytes | None:
-    """Intenta descargar XML. Si recibe HTML/portal, prueba variantes y proxy."""
-    for candidate in variants_for(url):
+    """Intenta descargar XML probando variantes y proxies; valida parse."""
+    tried = all_variants(url)
+    for candidate in tried:
         try:
             r = requests.get(candidate, headers=HTTP_HEADERS, timeout=60, allow_redirects=True)
             print(f"[FETCH] {candidate} -> {r.status_code} bytes:{len(r.content)}")
+
+            # 204/3xx/4xx/5xx
             r.raise_for_status()
-            if is_probably_html(r.content):
-                print("[FETCH] Parece HTML/portal, probando siguiente variante...")
+
+            head = safe_head(r.content, 200)
+            if is_probably_html_or_json(r.content):
+                print(f"[FETCH] Parece HTML/JSON. Head: {head!r}")
                 continue
-            # Validar que parsea como XML
+
+            # Validar que sea XML
             ET.fromstring(r.content)
             print("[FETCH] XML válido ✔")
             return r.content
+
         except Exception as e:
             print(f"[FETCH] Fallo con {candidate}: {e}")
             continue
+
     print("[FETCH] No se pudo obtener XML válido para:", url)
     return None
 
 def parse_rss_or_atom(xml_bytes: bytes):
     """Devuelve lista de (title, link, summary, published_raw)."""
     root = ET.fromstring(xml_bytes)
-
     items = []
 
-    # RSS 2.0
+    # RSS
     for it in root.findall(".//item"):
         title = (it.findtext("title") or "").strip()
         link  = (it.findtext("link") or "").strip()
@@ -106,7 +137,7 @@ def parse_rss_or_atom(xml_bytes: bytes):
     if items:
         return items
 
-    # Atom con namespace clásico
+    # Atom con namespace
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     for e in root.findall(".//atom:entry", ns):
         title = (e.findtext("atom:title", default="", namespaces=ns) or "").strip()
@@ -128,12 +159,13 @@ def parse_rss_or_atom(xml_bytes: bytes):
         desc = (e.findtext("summary") or e.findtext("content") or "").strip()
         pub  = (e.findtext("updated") or e.findtext("published") or "").strip()
         items.append((title, link, desc, pub))
+
     return items
 
 def parse_date(s: str):
     s = (s or "").strip().replace("Z","+0000")
     fmts = [
-        "%a, %d %b %Y %H:%M:%S %z",  # RSS
+        "%a, %d %b %Y %H:%M:%S %z",
         "%d/%m/%Y %H:%M",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S",
@@ -199,7 +231,6 @@ def main():
         for t, l, _, _ in items[:3]:
             print(f"       - {t[:80]} -> {l}")
 
-        # Filtro por keywords (opcional)
         filtered = []
         for title, link, summary, pub in items:
             if not STRICT_FILTER:
