@@ -14,8 +14,9 @@ if not PLACSP_FEEDS:
 RPC_UPSERT_TENDER = f"{SUPABASE_URL}/rest/v1/rpc/upsert_tender"
 RPC_ASSIGN_CATS   = f"{SUPABASE_URL}/rest/v1/rpc/assign_categories_from_keywords"
 
+# User-Agent de navegador para evitar portales intermedios/HTML
 HTTP_HEADERS = {
-    "User-Agent": "Radar-Teknovashop/1.1 (+https://teknovashop.com)",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Radar-Scraper/1.1",
     "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml, */*",
 }
 
@@ -70,7 +71,7 @@ def parse_rss_or_atom(xml_bytes: bytes):
     if items:
         return items
 
-    # Atom sin declarar namespace (poco habitual, pero por si acaso)
+    # Atom sin namespace (fallback)
     for e in root.findall(".//entry"):
         title = (e.findtext("title") or "").strip()
         link_el = e.find("link")
@@ -136,7 +137,11 @@ def main():
         print(f"[INFO] Leyendo: {feed_url}")
         try:
             xml = fetch(feed_url)
+            # Si el feed devuelve HTML (portal/cookies), esto fallará al parsear
             items = parse_rss_or_atom(xml)
+        except ET.ParseError as e:
+            print(f"[WARN] El contenido no es XML válido (probable HTML/portal). {e}")
+            continue
         except Exception as e:
             print(f"[WARN] No se pudo procesar feed {feed_url}: {e}")
             continue
