@@ -2,8 +2,7 @@ name: Radar Tecnológico (daily)
 
 on:
   schedule:
-    # Ejecución diaria a las 06:15 UTC
-    - cron: "15 6 * * *"
+    - cron: "15 6 * * *"   # 06:15 UTC
   workflow_dispatch:
 
 jobs:
@@ -21,13 +20,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
-      # --- Scraper TED (UE) ---
-      # Si TED falla puntualmente (404/429), no queremos que pare todo el job.
+      # -------- TED (UE) ----------
       - name: Scraper TED (UE)
         run: python scraper/scraper_radar.py
         continue-on-error: true
@@ -35,16 +33,60 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
 
-      # --- Scraper España (PLACSP) ---
-      # Usamos STRICT_FILTER=false temporalmente para validar el flujo end-to-end
-      # e insertar resultados del feed general. Después, cámbialo a "true".
+      # -------- Diagnóstico PLACSP (no escribe en BD) ----------
+      - name: Diagnóstico PLACSP (feeds e items)
+        run: |
+          python - << 'PY'
+          import os, requests, xml.etree.ElementTree as ET
+          feeds = os.environ.get("PLACSP_FEEDS","").strip()
+          print("[DIAG] PLACSP_FEEDS presente:", bool(feeds))
+          lst = [u.strip() for u in feeds.split(",") if u.strip()]
+          print("[DIAG] Nº feeds:", len(lst))
+          if not lst:
+              raise SystemExit("No hay feeds. Añade el secret PLACSP_FEEDS (p.ej. https://contrataciondelestado.es/sindicacion/sindicacion_300.atom)")
+          url = lst[0]
+          print("[DIAG] Primer feed:", url)
+          r = requests.get(url, timeout=60, headers={"User-Agent":"diag/1.0"})
+          print("[DIAG] HTTP status:", r.status_code, "bytes:", len(r.content))
+          root = ET.fromstring(r.content)
+
+          def pick_items(root):
+              out=[]
+              # RSS
+              for it in root.findall(".//item"):
+                  t=(it.findtext("title") or "").strip()
+                  l=(it.findtext("link") or "").strip()
+                  out.append((t,l))
+              if out: return out
+              # Atom con ns
+              ns={"atom":"http://www.w3.org/2005/Atom"}
+              for e in root.findall(".//atom:entry",ns):
+                  t=(e.findtext("atom:title", default="", namespaces=ns) or "").strip()
+                  le=e.find("atom:link",ns); l=le.get("href") if le is not None else ""
+                  out.append((t,l))
+              if out: return out
+              # Atom sin ns
+              for e in root.findall(".//entry"):
+                  t=(e.findtext("title") or "").strip()
+                  le=e.find("link"); l=le.get("href") if le is not None else ""
+                  out.append((t,l))
+              return out
+
+          items = pick_items(root)
+          print("[DIAG] Items detectados en feed:", len(items))
+          for t,l in items[:3]:
+              print("  -", t[:100], "->", l)
+          PY
+        env:
+          PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
+
+      # -------- Scraper España (PLACSP) ----------
+      # Usamos STRICT_FILTER=false temporalmente para poblar y validar end-to-end.
       - name: Scraper España (PLACSP)
         run: python scraper/scraper_spain_placsp.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-          # Secret con una o varias URLs separadas por coma (recomendado empezar con el feed general):
-          # https://contrataciondelestado.es/sindicacion/sindicacion_300.atom
           PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
-          STRICT_FILTER: "false"   # <-- tras validar, ponlo en "true"
-          MAX_ITEMS: "150"         # límite de inserciones por ejecución desde PLACSP
+          STRICT_FILTER: "false"   # luego cámbialo a "true"
+          MAX_ITEMS: "150"
