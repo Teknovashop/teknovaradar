@@ -1,4 +1,4 @@
-import os, requests, re, datetime as dt
+import os, requests, re, datetime as dt, urllib.parse as up
 import xml.etree.ElementTree as ET
 
 # ====== Config ======
@@ -14,10 +14,13 @@ if not PLACSP_FEEDS:
 RPC_UPSERT_TENDER = f"{SUPABASE_URL}/rest/v1/rpc/upsert_tender"
 RPC_ASSIGN_CATS   = f"{SUPABASE_URL}/rest/v1/rpc/assign_categories_from_keywords"
 
-# User-Agent de navegador para evitar portales intermedios/HTML
+# Cabeceras "de navegador" para evitar portales intermedios
 HTTP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Radar-Scraper/1.1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Radar-Scraper/1.2",
     "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "es-ES,es;q=0.9",
+    "Referer": "https://www.contrataciondelestado.es/",
+    "Connection": "keep-alive",
 }
 
 SB_HEADERS = {
@@ -26,7 +29,7 @@ SB_HEADERS = {
     "Content-Type": "application/json",
 }
 
-# Palabras clave tecnológicas (ajústalas a gusto)
+# Palabras clave tecnológicas (ajústalas)
 KEYWORDS = re.compile(
     r"(inteligencia artificial|ai\b|machine learning|deep learning|datos|data\b|big data|anal[ií]tica|"
     r"visualizaci[oó]n|cloud|nube|aws|azure|gcp|kubernetes|devops|software|desarrollo|"
@@ -36,10 +39,56 @@ KEYWORDS = re.compile(
 )
 
 # ====== Utils ======
-def fetch(url: str) -> bytes:
-    r = requests.get(url, headers=HTTP_HEADERS, timeout=60, allow_redirects=True)
-    r.raise_for_status()
-    return r.content
+def is_probably_html(b: bytes) -> bool:
+    sample = (b or b"")[:512].lower()
+    return sample.startswith(b"<!doctype html") or b"<html" in sample or b"<meta" in sample
+
+def variants_for(url: str):
+    """Genera variantes (www/http) y fallback proxy r.jina.ai."""
+    urls = [url]
+
+    try:
+        p = up.urlparse(url)
+        host = p.netloc
+        if host and not host.startswith("www."):
+            with_www = up.urlunparse(p._replace(netloc="www."+host))
+            urls.append(with_www)
+        if p.scheme == "https":
+            urls.append(up.urlunparse(p._replace(scheme="http")))
+    except Exception:
+        pass
+
+    # Fallback proxy (sólo lectura). Sirve el contenido plano sin cookies.
+    # Nota: mantiene el esquema original al proxificar.
+    def to_proxy(u: str):
+        p = up.urlparse(u)
+        prox = f"https://r.jina.ai/{p.scheme}://{p.netloc}{p.path}"
+        if p.query:
+            prox += f"?{p.query}"
+        return prox
+
+    urls.append(to_proxy(url))
+    return list(dict.fromkeys(urls))  # quitar duplicados preservando orden
+
+def fetch_xml_with_fallback(url: str) -> bytes | None:
+    """Intenta descargar XML. Si recibe HTML/portal, prueba variantes y proxy."""
+    for candidate in variants_for(url):
+        try:
+            r = requests.get(candidate, headers=HTTP_HEADERS, timeout=60, allow_redirects=True)
+            print(f"[FETCH] {candidate} -> {r.status_code} bytes:{len(r.content)}")
+            r.raise_for_status()
+            if is_probably_html(r.content):
+                print("[FETCH] Parece HTML/portal, probando siguiente variante...")
+                continue
+            # Validar que parsea como XML
+            ET.fromstring(r.content)
+            print("[FETCH] XML válido ✔")
+            return r.content
+        except Exception as e:
+            print(f"[FETCH] Fallo con {candidate}: {e}")
+            continue
+    print("[FETCH] No se pudo obtener XML válido para:", url)
+    return None
 
 def parse_rss_or_atom(xml_bytes: bytes):
     """Devuelve lista de (title, link, summary, published_raw)."""
@@ -84,10 +133,10 @@ def parse_rss_or_atom(xml_bytes: bytes):
 def parse_date(s: str):
     s = (s or "").strip().replace("Z","+0000")
     fmts = [
-        "%a, %d %b %Y %H:%M:%S %z",  # RSS en inglés
-        "%d/%m/%Y %H:%M",            # algunos feeds locales
-        "%Y-%m-%dT%H:%M:%S%z",       # ISO con tz
-        "%Y-%m-%dT%H:%M:%S",         # ISO sin tz
+        "%a, %d %b %Y %H:%M:%S %z",  # RSS
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%d",
     ]
     for fmt in fmts:
@@ -102,8 +151,8 @@ def parse_date(s: str):
 
 def upsert_tender(source_code, external_id, title, summary, url, published_at):
     payload = {
-        "p_source_code": source_code,   # 'ES-PLACSP'
-        "p_external_id": external_id,   # usamos link como id externo
+        "p_source_code": source_code,
+        "p_external_id": external_id,
         "p_title": title[:8000],
         "p_summary": (summary or "")[:8000] or None,
         "p_body": None,
@@ -135,15 +184,15 @@ def main():
 
     for feed_url in feeds:
         print(f"[INFO] Leyendo: {feed_url}")
-        try:
-            xml = fetch(feed_url)
-            # Si el feed devuelve HTML (portal/cookies), esto fallará al parsear
-            items = parse_rss_or_atom(xml)
-        except ET.ParseError as e:
-            print(f"[WARN] El contenido no es XML válido (probable HTML/portal). {e}")
+
+        xml = fetch_xml_with_fallback(feed_url)
+        if not xml:
             continue
+
+        try:
+            items = parse_rss_or_atom(xml)
         except Exception as e:
-            print(f"[WARN] No se pudo procesar feed {feed_url}: {e}")
+            print(f"[WARN] No se pudo parsear XML final: {e}")
             continue
 
         print(f"[INFO] Items en feed: {len(items)}")
