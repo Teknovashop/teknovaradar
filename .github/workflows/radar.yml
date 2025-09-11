@@ -2,34 +2,49 @@ name: Radar Tecnológico (daily)
 
 on:
   schedule:
-    - cron: "15 6 * * *"   # 06:15 UTC
+    # Ejecución diaria a las 06:15 UTC
+    - cron: "15 6 * * *"
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    permissions:
+      contents: read
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install requests
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
       # --- Scraper TED (UE) ---
+      # Si TED falla puntualmente (404/429), no queremos que pare todo el job.
       - name: Scraper TED (UE)
         run: python scraper/scraper_radar.py
+        continue-on-error: true
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
 
       # --- Scraper España (PLACSP) ---
-    - name: Scraper España (PLACSP)
-    run: python scraper/scraper_spain_placsp.py
-    env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-      PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
-      STRICT_FILTER: "false"   # <-- temporal para validar pipeline
-      MAX_ITEMS: "150"
+      # Usamos STRICT_FILTER=false temporalmente para validar el flujo end-to-end
+      # e insertar resultados del feed general. Después, cámbialo a "true".
+      - name: Scraper España (PLACSP)
+        run: python scraper/scraper_spain_placsp.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          # Secret con una o varias URLs separadas por coma (recomendado empezar con el feed general):
+          # https://contrataciondelestado.es/sindicacion/sindicacion_300.atom
+          PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
+          STRICT_FILTER: "false"   # <-- tras validar, ponlo en "true"
+          MAX_ITEMS: "150"         # límite de inserciones por ejecución desde PLACSP
