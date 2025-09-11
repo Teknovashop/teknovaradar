@@ -25,12 +25,11 @@ jobs:
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
 
       # --- Scraper España (PLACSP) ---
-      - name: Scraper España (PLACSP)
-        run: python scraper/scraper_spain_placsp.py
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-          # 👉 Lista separada por comas con tus feeds reales de la PLACSP:
-          # Ejemplos (sustituye por tus URLs de sindicación reales):
-          # PLACSP_FEEDS: "https://perfil_organismo_1/feed.atom,https://perfil_organismo_2/feed.rss"
-          PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
+    - name: Scraper España (PLACSP)
+    run: python scraper/scraper_spain_placsp.py
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+      PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
+      STRICT_FILTER: "false"   # <-- temporal para validar pipeline
+      MAX_ITEMS: "150"
