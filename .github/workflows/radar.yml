@@ -2,7 +2,7 @@ name: Radar Tecnológico (daily)
 
 on:
   schedule:
-    - cron: "15 6 * * *"   # 06:15 UTC
+    - cron: "15 6 * * *"   # 06:15 UTC, ajusta si quieres
   workflow_dispatch:
 
 jobs:
@@ -34,48 +34,59 @@ jobs:
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
 
       # -------- Diagnóstico PLACSP (no escribe en BD) ----------
+      # Esta comprobación imprime estado HTTP y los 3 primeros ítems si el feed es válido.
+      # No bloquea el job si el feed devuelve HTML/portal.
       - name: Diagnóstico PLACSP (feeds e items)
+        continue-on-error: true
         run: |
           python - << 'PY'
           import os, requests, xml.etree.ElementTree as ET
+
+          UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Radar-Diag/1.0"}
+
           feeds = os.environ.get("PLACSP_FEEDS","").strip()
           print("[DIAG] PLACSP_FEEDS presente:", bool(feeds))
           lst = [u.strip() for u in feeds.split(",") if u.strip()]
           print("[DIAG] Nº feeds:", len(lst))
           if not lst:
-              raise SystemExit("No hay feeds. Añade el secret PLACSP_FEEDS (p.ej. https://contrataciondelestado.es/sindicacion/sindicacion_300.atom)")
-          url = lst[0]
-          print("[DIAG] Primer feed:", url)
-          r = requests.get(url, timeout=60, headers={"User-Agent":"diag/1.0"})
-          print("[DIAG] HTTP status:", r.status_code, "bytes:", len(r.content))
-          root = ET.fromstring(r.content)
+              print("[DIAG] Falta PLACSP_FEEDS. Ejemplo: https://contrataciondelestado.es/sindicacion/sindicacion_1050.atom")
+          else:
+              url = lst[0]
+              print("[DIAG] Primer feed:", url)
+              r = requests.get(url, timeout=60, headers=UA, allow_redirects=True)
+              print("[DIAG] HTTP status:", r.status_code, "bytes:", len(r.content))
+              try:
+                  root = ET.fromstring(r.content)
+              except Exception as e:
+                  print("[DIAG] No es XML válido (probable portal/HTML).", e)
+                  raise SystemExit(0)
 
-          def pick_items(root):
-              out=[]
-              # RSS
-              for it in root.findall(".//item"):
-                  t=(it.findtext("title") or "").strip()
-                  l=(it.findtext("link") or "").strip()
-                  out.append((t,l))
-              if out: return out
-              # Atom con ns
-              ns={"atom":"http://www.w3.org/2005/Atom"}
-              for e in root.findall(".//atom:entry",ns):
-                  t=(e.findtext("atom:title", default="", namespaces=ns) or "").strip()
-                  le=e.find("atom:link",ns); l=le.get("href") if le is not None else ""
-                  out.append((t,l))
-              if out: return out
-              # Atom sin ns
-              for e in root.findall(".//entry"):
-                  t=(e.findtext("title") or "").strip()
-                  le=e.find("link"); l=le.get("href") if le is not None else ""
-                  out.append((t,l))
-              return out
+              def pick_items(root):
+                  out=[]
+                  # RSS
+                  for it in root.findall(".//item"):
+                      t=(it.findtext("title") or "").strip()
+                      l=(it.findtext("link") or "").strip()
+                      out.append((t,l))
+                  if out: return out
+                  # Atom con ns
+                  ns={"atom":"http://www.w3.org/2005/Atom"}
+                  for e in root.findall(".//atom:entry",ns):
+                      t=(e.findtext("atom:title", default="", namespaces=ns) or "").strip()
+                      le=e.find("atom:link",ns); l=le.get("href") if le is not None else ""
+                      out.append((t,l))
+                  if out: return out
+                  # Atom sin ns
+                  for e in root.findall(".//entry"):
+                      t=(e.findtext("title") or "").strip()
+                      le=e.find("link"); l=le.get("href") if le is not None else ""
+                      out.append((t,l))
+                  return out
 
-          items = pick_items(root)
-          print("[DIAG] Items detectados en feed:", len(items))
-          for t,l in items[:3]:
-              print("  -", t[:100], "->", l)
+              items = pick_items(root)
+              print("[DIAG] Items detectados en feed:", len(items))
+              for t,l in items[:3]:
+                  print("  -", t[:100], "->", l)
           PY
         env:
           PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
@@ -87,6 +98,11 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          # Pon varias URLs separadas por coma. Ejemplos recomendados:
+          # https://contrataciondelestado.es/sindicacion/sindicacion_1050.atom  (en curso)
+          # https://contrataciondelestado.es/sindicacion/sindicacion_101.atom   (últimas)
+          # https://contrataciondelestado.es/sindicacion/sindicacion_200.atom   (adjudicadas)
+          # https://contrataciondelestado.es/sindicacion/sindicacion_48000000.atom (CPV software)
           PLACSP_FEEDS: ${{ secrets.PLACSP_FEEDS }}
           STRICT_FILTER: "false"   # luego cámbialo a "true"
           MAX_ITEMS: "150"
